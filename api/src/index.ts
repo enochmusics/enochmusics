@@ -20,6 +20,8 @@ const port = Number(process.env.PORT || 4000);
 const baseTicketsPerClear = 1;
 const defaultNoteSkinId = Number(process.env.DEFAULT_NOTE_SKIN_ID || 1);
 const defaultGearSkinId = Number(process.env.DEFAULT_GEAR_SKIN_ID || 100);
+const maxRawScore = Number(process.env.MAX_RAW_SCORE || 10000000);
+const minRunDurationSeconds = Number(process.env.MIN_RUN_DURATION_SECONDS || 10);
 const creditPriceWei = BigInt(requireEnv('CREDIT_PRICE_WEI'));
 const rpcUrl = requireEnv('RPC_URL');
 enforceTlsUrl(rpcUrl, 'RPC_URL');
@@ -32,6 +34,7 @@ if (normalizeWalletAddress(serverSigner.address) !== serverWalletAddress) {
   throw new Error('SERVER_WALLET_ADDRESS does not match SERVER_WALLET_PRIVATE_KEY');
 }
 const depositAbi = ['function deposit(bytes32 orderId) payable'];
+const erc721Abi = ['function ownerOf(uint256 tokenId) view returns (address)'];
 const depositContract = new ethers.Contract(depositContractAddress, depositAbi, serverSigner);
 
 function normalizeWalletAddress(value: string) {
@@ -64,6 +67,63 @@ async function ensureUserDefaults(userId: number) {
      ON CONFLICT DO NOTHING`,
     [userId, defaultNoteSkinId, defaultGearSkinId]
   );
+}
+
+async function refreshNftSkinsForUser(userId: number, walletAddress: string) {
+  const rules = await query<{ contract_address: string; token_id: string; skin_id: number }>(
+    `SELECT contract_address, token_id, skin_id FROM nft_skin_rules`
+  );
+  if (rules.rowCount === 0) {
+    return;
+  }
+  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const ownedSkinIds = new Set<number>();
+  for (const rule of rules.rows) {
+    try {
+      const contract = new ethers.Contract(rule.contract_address, erc721Abi, provider);
+      const owner = await contract.ownerOf(rule.token_id);
+      if (normalizeWalletAddress(owner) === normalizeWalletAddress(walletAddress)) {
+        ownedSkinIds.add(rule.skin_id);
+      }
+    } catch (error) {
+      console.warn('NFT ownership check failed', { contract: rule.contract_address, tokenId: rule.token_id });
+    }
+  }
+
+  const allRuleSkinIds = rules.rows.map((rule) => rule.skin_id);
+  const skinsToRemove = allRuleSkinIds.filter((skinId) => !ownedSkinIds.has(skinId));
+  const skinsToAdd = Array.from(ownedSkinIds);
+
+  if (skinsToRemove.length > 0) {
+    await query(
+      `DELETE FROM user_unlocked_skins
+       WHERE user_id = $1 AND skin_id = ANY($2::int[])`,
+      [userId, skinsToRemove]
+    );
+  }
+  if (skinsToAdd.length > 0) {
+    await query(
+      `INSERT INTO user_unlocked_skins (user_id, skin_id)
+       SELECT $1, unnest($2::int[])
+       ON CONFLICT DO NOTHING`,
+      [userId, skinsToAdd]
+    );
+  }
+
+  const equippedResult = await query(
+    'SELECT equipped_note_skin_id, equipped_gear_skin_id FROM users WHERE id = $1',
+    [userId]
+  );
+  if (equippedResult.rowCount > 0) {
+    const equippedNote = equippedResult.rows[0].equipped_note_skin_id;
+    const equippedGear = equippedResult.rows[0].equipped_gear_skin_id;
+    if (skinsToRemove.includes(equippedNote)) {
+      await query('UPDATE users SET equipped_note_skin_id = $1 WHERE id = $2', [defaultNoteSkinId, userId]);
+    }
+    if (skinsToRemove.includes(equippedGear)) {
+      await query('UPDATE users SET equipped_gear_skin_id = $1 WHERE id = $2', [defaultGearSkinId, userId]);
+    }
+  }
 }
 
 function decryptNumber(value: string, label: string) {
@@ -124,6 +184,7 @@ async function ensureUserForWallet(walletAddress: string) {
 
   const userId = upsert.rows[0].id;
   await ensureUserDefaults(userId);
+  await refreshNftSkinsForUser(userId, walletAddress);
 
   const user = await query(
     `SELECT id, wallet_address_encrypted, credit_balance_encrypted, raffle_tickets_total_encrypted,
@@ -332,7 +393,7 @@ app.post('/runs/finish', async (req, res) => {
     await client.query('BEGIN');
     const runResult = await client.query(
       `SELECT runs.run_id, runs.status, runs.multiplier_locked, runs.user_id,
-              users.wallet_address_hash
+              runs.created_at, users.wallet_address_hash
        FROM runs
        JOIN users ON users.id = runs.user_id
        WHERE runs.run_id = $1 FOR UPDATE`,
@@ -352,6 +413,22 @@ app.post('/runs/finish', async (req, res) => {
     if (run.status === 'finished') {
       await client.query('COMMIT');
       return res.json({ runId, status: 'finished' });
+    }
+
+    if (Number.isNaN(rawScore) || rawScore < 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'invalid rawScore' });
+    }
+    if (rawScore > maxRawScore) {
+      console.warn('raw score exceeds max threshold', { runId, rawScore });
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'rawScore exceeds maximum' });
+    }
+
+    const startedAt = new Date(run.created_at);
+    const durationSeconds = (Date.now() - startedAt.getTime()) / 1000;
+    if (durationSeconds < minRunDurationSeconds) {
+      console.warn('run finished too quickly', { runId, durationSeconds });
     }
 
     const ticketsEarned = cleared ? baseTicketsPerClear * run.multiplier_locked : 0;
@@ -467,6 +544,7 @@ app.post('/skins/refresh', async (req, res) => {
   }
   await ensureDefaultSkins();
   await ensureUserDefaults(userResult.rows[0].id);
+  await refreshNftSkinsForUser(userResult.rows[0].id, wallet);
   return res.json({ status: 'refreshed' });
 });
 

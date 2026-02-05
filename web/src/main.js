@@ -1,18 +1,12 @@
-import { ethers } from 'ethers';
 import './style.css';
 
 const apiUrl = import.meta.env.VITE_API_URL;
-const chainId = Number(import.meta.env.VITE_CHAIN_ID || 11124);
-const depositContract = import.meta.env.VITE_DEPOSIT_CONTRACT;
-const creditPriceWei = BigInt(import.meta.env.VITE_CREDIT_PRICE_WEI || '1000000000000000');
 const unityUrl = import.meta.env.VITE_UNITY_URL;
 const chatWsUrl = import.meta.env.VITE_CHAT_WS_URL || 'wss://localhost:4000';
 const allowInsecureLocal = import.meta.env.VITE_ALLOW_INSECURE_LOCAL === 'true' || import.meta.env.DEV;
 
 const state = {
   walletAddress: null,
-  provider: null,
-  signer: null,
   creditBalance: 0,
   equippedNote: null,
   equippedGear: null,
@@ -59,7 +53,7 @@ app.innerHTML = `
         <p>Web3 rhythm game lobby & controls</p>
       </div>
       <div class="wallet">
-        <button id="connectWallet">Connect Wallet</button>
+        <button id="connectWallet">Connect Account</button>
         <div id="walletAddress" class="muted"></div>
       </div>
     </header>
@@ -148,7 +142,7 @@ async function loadLeaderboards() {
 
 async function loadSkins() {
   if (!state.walletAddress) {
-    skinsContainer.innerHTML = '<p class="muted">Connect wallet to view skins.</p>';
+    skinsContainer.innerHTML = '<p class="muted">Connect account to view skins.</p>';
     return;
   }
   const data = await apiFetch('/skins/available');
@@ -194,25 +188,12 @@ async function refreshMe() {
 }
 
 async function connectWallet() {
-  if (!window.ethereum) {
-    alert('Wallet not detected');
-    return;
-  }
-  state.provider = new ethers.BrowserProvider(window.ethereum);
-  const accounts = await state.provider.send('eth_requestAccounts', []);
-  state.walletAddress = accounts[0].toLowerCase();
-  walletLabel.textContent = state.walletAddress;
-
-  const network = await state.provider.getNetwork();
-  if (Number(network.chainId) !== chainId) {
-    alert(`Please switch to chain ${chainId}`);
-  }
-
-  await apiFetch('/auth/wallet-login', {
+  const response = await apiFetch('/auth/server-login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ walletAddress: state.walletAddress }),
   });
+  state.walletAddress = response.user.wallet_address;
+  walletLabel.textContent = state.walletAddress;
 
   await refreshMe();
   await loadSkins();
@@ -220,17 +201,11 @@ async function connectWallet() {
 
 async function buyCredits() {
   if (!state.walletAddress) {
-    alert('Connect wallet first');
+    alert('Connect account first');
     return;
   }
-  const order = await apiFetch('/credits/create-order', { method: 'POST' });
-
-  const signer = await state.provider.getSigner();
-  const depositAbi = ['function deposit(bytes32 orderId) payable'];
-  const contract = new ethers.Contract(depositContract, depositAbi, signer);
-  chatSocket = new WebSocket(secureChatWsUrl);
-  alert('Deposit sent. Credits will appear after confirmations.');
-}
+  const order = await apiFetch('/credits/buy', { method: 'POST' });
+  alert(`Deposit sent. Credits will appear after confirmations.\nTx: ${order.txHash}`);
 
 connectBtn.addEventListener('click', connectWallet);
 buyCreditsBtn.addEventListener('click', buyCredits);

@@ -18,6 +18,14 @@ CREATE TABLE IF NOT EXISTS credit_ledger (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS credit_orders (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  order_id_encrypted TEXT NOT NULL,
+  order_id_hash TEXT NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS onchain_deposits (
   id SERIAL PRIMARY KEY,
   chain_id INTEGER NOT NULL,

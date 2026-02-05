@@ -4,7 +4,7 @@ Production-minded MVP for the Web3 rhythm game. Unity WebGL client is managed se
 
 ## Monorepo Layout
 
-- `web/` - Web frontend (wallet connect, credits purchase, leaderboards, skins, chat UI)
+- `web/` - Web frontend (server-managed account, credits purchase, leaderboards, skins, chat UI)
 - `api/` - REST API (runs, credits, skins, leaderboards)
 - `worker/` - Deposit indexer (mints off-chain credits)
 - `contracts/` - Solidity deposit contract + deploy script
@@ -63,6 +63,8 @@ CHAIN_ID=11124
 RPC_URL=https://api.testnet.abs.xyz
 CONFIRMATIONS_REQUIRED=3
 DEPOSIT_CONTRACT_ADDRESS=0x0000000000000000000000000000000000000000
+SERVER_WALLET_ADDRESS=0x0000000000000000000000000000000000000000
+SERVER_WALLET_PRIVATE_KEY=0xabc123...
 DEFAULT_NOTE_SKIN_ID=1
 DEFAULT_GEAR_SKIN_ID=100
 CREDIT_PRICE_WEI=1000000000000000
@@ -88,8 +90,6 @@ CREDIT_PRICE_WEI=1000000000000000
 
 ```
 VITE_API_URL=https://localhost:4000
-VITE_CHAIN_ID=11124
-VITE_DEPOSIT_CONTRACT=0x0000000000000000000000000000000000000000
 VITE_CREDIT_PRICE_WEI=1000000000000000
 VITE_UNITY_URL=https://example.com/unity/index.html
 VITE_CHAT_WS_URL=wss://api.testnet.abs.xyz/ws
@@ -117,6 +117,7 @@ RPC_URL=https://api.testnet.abs.xyz
 
 - Credit price is fixed: **0.001 ETH = 1 Credit** (configurable via `CREDIT_PRICE_WEI`).
 - Credits are stored off-chain; the chain is only used for deposits.
+- The web client only talks to the API; the API signs deposit transactions with `SERVER_WALLET_PRIVATE_KEY` and the worker credits users by matching on `orderId`.
 - Backend is authoritative for runs, tickets, and skin equip.
 
 ## Security Architecture & Encryption Model

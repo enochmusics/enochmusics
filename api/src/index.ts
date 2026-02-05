@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { v4 as uuidv4 } from 'uuid';
+import { ethers } from 'ethers';
 import { pool, query } from './db.js';
 import { createServer as createHttpServer } from 'http';
 import { createServer as createHttpsServer } from 'https';
@@ -19,6 +20,19 @@ const port = Number(process.env.PORT || 4000);
 const baseTicketsPerClear = 1;
 const defaultNoteSkinId = Number(process.env.DEFAULT_NOTE_SKIN_ID || 1);
 const defaultGearSkinId = Number(process.env.DEFAULT_GEAR_SKIN_ID || 100);
+const creditPriceWei = BigInt(requireEnv('CREDIT_PRICE_WEI'));
+const rpcUrl = requireEnv('RPC_URL');
+enforceTlsUrl(rpcUrl, 'RPC_URL');
+const depositContractAddress = requireEnv('DEPOSIT_CONTRACT_ADDRESS');
+const serverWalletAddress = normalizeWalletAddress(requireEnv('SERVER_WALLET_ADDRESS'));
+const serverWalletPrivateKey = requireEnv('SERVER_WALLET_PRIVATE_KEY');
+const serverProvider = new ethers.JsonRpcProvider(rpcUrl);
+const serverSigner = new ethers.Wallet(serverWalletPrivateKey, serverProvider);
+if (normalizeWalletAddress(serverSigner.address) !== serverWalletAddress) {
+  throw new Error('SERVER_WALLET_ADDRESS does not match SERVER_WALLET_PRIVATE_KEY');
+}
+const depositAbi = ['function deposit(bytes32 orderId) payable'];
+const depositContract = new ethers.Contract(depositContractAddress, depositAbi, serverSigner);
 
 function normalizeWalletAddress(value: string) {
   return value.toLowerCase();
@@ -78,14 +92,7 @@ function mapUserRow(row: {
   };
 }
 
-app.post('/auth/wallet-login', async (req, res) => {
-  const walletAddress = (req.body.walletAddress as string | undefined)
-    ? normalizeWalletAddress(req.body.walletAddress)
-    : undefined;
-  if (!walletAddress) {
-    return res.status(400).json({ error: 'walletAddress required' });
-  }
-
+async function ensureUserForWallet(walletAddress: string) {
   await ensureDefaultSkins();
   const walletHash = getWalletHash(walletAddress);
   const walletEncrypted = encryptString(walletAddress);
@@ -125,7 +132,24 @@ app.post('/auth/wallet-login', async (req, res) => {
     [userId]
   );
 
-  return res.json({ user: mapUserRow(user.rows[0]) });
+  return mapUserRow(user.rows[0]);
+}
+
+app.post('/auth/wallet-login', async (req, res) => {
+  const walletAddress = (req.body.walletAddress as string | undefined)
+    ? normalizeWalletAddress(req.body.walletAddress)
+    : undefined;
+  if (!walletAddress) {
+    return res.status(400).json({ error: 'walletAddress required' });
+  }
+
+  const user = await ensureUserForWallet(walletAddress);
+  return res.json({ user });
+});
+
+app.post('/auth/server-login', async (_req, res) => {
+  const user = await ensureUserForWallet(serverWalletAddress);
+  return res.json({ user });
 });
 
 app.get('/me', async (req, res) => {
@@ -153,6 +177,34 @@ app.post('/credits/create-order', async (req, res) => {
   }
   const orderId = uuidv4();
   return res.json({ orderId });
+});
+
+app.post('/credits/buy', async (req, res) => {
+  const wallet = getWalletAddress(req);
+  if (!wallet) {
+    return res.status(401).json({ error: 'x-wallet-address required' });
+  }
+  if (wallet !== serverWalletAddress) {
+    return res.status(403).json({ error: 'wallet not authorized for server purchases' });
+  }
+  const walletHash = getWalletHash(wallet);
+  const userResult = await query('SELECT id FROM users WHERE wallet_address_hash = $1', [walletHash]);
+  if (userResult.rowCount === 0) {
+    return res.status(404).json({ error: 'user not found' });
+  }
+  const orderId = uuidv4();
+  const orderIdBytes32 = ethers.id(orderId);
+  const orderIdHash = hashValue(orderIdBytes32);
+
+  await query(
+    `INSERT INTO credit_orders (user_id, order_id_encrypted, order_id_hash)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (order_id_hash) DO NOTHING`,
+    [userResult.rows[0].id, encryptString(orderIdBytes32), orderIdHash]
+  );
+
+  const tx = await depositContract.deposit(orderIdBytes32, { value: creditPriceWei });
+  return res.json({ orderId, orderIdBytes32, txHash: tx.hash });
 });
 
 app.get('/credits/order-status', async (req, res) => {

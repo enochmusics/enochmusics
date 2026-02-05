@@ -109,6 +109,7 @@ async function processDeposits() {
 
   for (const log of logs) {
     const payer = normalizeWalletAddress(log.args?.payer as string);
+    const orderId = log.args?.orderId as string | undefined;
     const amountWei = log.args?.amountWei as bigint;
     const creditsToMint = Number(amountWei / creditPriceWei);
     if (creditsToMint <= 0) {
@@ -118,7 +119,19 @@ async function processDeposits() {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const userId = await upsertUser(client, payer);
+      let userId: number | null = null;
+      if (orderId) {
+        const orderIdHash = hashValue(orderId);
+        const orderResult = await client.query('SELECT user_id FROM credit_orders WHERE order_id_hash = $1', [
+          orderIdHash,
+        ]);
+        if (orderResult.rowCount > 0) {
+          userId = orderResult.rows[0].user_id as number;
+        }
+      }
+      if (!userId) {
+        userId = await upsertUser(client, payer);
+      }
       const txHash = log.transactionHash;
       const txHashHash = hashValue(txHash);
       const txHashEncrypted = encryptString(txHash);
@@ -158,7 +171,7 @@ async function processDeposits() {
           [
             userId,
             encryptString(String(creditsToMint)),
-            encryptString(JSON.stringify({ txHash, logIndex: log.index })),
+            encryptString(JSON.stringify({ txHash, logIndex: log.index, orderId })),
           ]
         );
       }

@@ -57,6 +57,7 @@ TLS_KEY_PATH=/path/to/api/tls-key.pem
 TLS_CA_PATH=/path/to/api/ca.pem
 ENCRYPTION_KEYS=primary:BASE64_32BYTE_KEY,rotated:BASE64_32BYTE_KEY
 ALLOW_INSECURE_LOCAL=false
+ADMIN_API_KEY=change_me
 JWT_SECRET=dev_secret
 CHAIN_ID=11124
 RPC_URL=https://abstract-testnet-rpc.example

@@ -411,6 +411,66 @@ app.post('/skins/equip', async (req, res) => {
   return res.json({ status: 'equipped' });
 });
 
+app.post('/admin/credits/adjust', async (req, res) => {
+  const adminKey = req.header('x-admin-key');
+  const expectedKey = requireEnv('ADMIN_API_KEY');
+  if (!adminKey || adminKey !== expectedKey) {
+    return res.status(403).json({ error: 'admin key invalid' });
+  }
+
+  const walletAddress = (req.body.walletAddress as string | undefined)
+    ? normalizeWalletAddress(req.body.walletAddress)
+    : undefined;
+  const delta = Number(req.body.delta);
+  if (!walletAddress || Number.isNaN(delta) || delta === 0) {
+    return res.status(400).json({ error: 'walletAddress and non-zero delta required' });
+  }
+
+  const reason = (req.body.reason as string | undefined) || 'admin_adjustment';
+  const walletHash = getWalletHash(walletAddress);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const userResult = await client.query(
+      'SELECT id, credit_balance_encrypted FROM users WHERE wallet_address_hash = $1 FOR UPDATE',
+      [walletHash]
+    );
+    if (userResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'user not found' });
+    }
+    const user = userResult.rows[0];
+    const currentBalance = decryptNumber(user.credit_balance_encrypted, 'credit_balance');
+    const updatedBalance = currentBalance + delta;
+    if (updatedBalance < 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'insufficient credits' });
+    }
+
+    await client.query('UPDATE users SET credit_balance_encrypted = $1 WHERE id = $2', [
+      encryptString(String(updatedBalance)),
+      user.id,
+    ]);
+    await client.query(
+      `INSERT INTO credit_ledger (user_id, delta_encrypted, reason, metadata_encrypted)
+       VALUES ($1, $2, $3, $4)`,
+      [
+        user.id,
+        encryptString(String(delta)),
+        reason,
+        encryptString(JSON.stringify({ reason, admin: true })),
+      ]
+    );
+    await client.query('COMMIT');
+    return res.json({ walletAddress, credit_balance: updatedBalance });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    return res.status(500).json({ error: 'credit adjustment failed' });
+  } finally {
+    client.release();
+  }
+});
+
 const insecureLocal = allowInsecureLocal() && process.env.NODE_ENV !== 'production';
 const server = insecureLocal
   ? createHttpServer(app)

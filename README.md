@@ -4,7 +4,7 @@ Production-minded MVP for the Web3 rhythm game. Unity WebGL client is managed se
 
 ## Monorepo Layout
 
-- `web/` - Web frontend (wallet connect, credits purchase, leaderboards, skins, chat UI)
+- `web/` - Web frontend (server-managed account, credits purchase, leaderboards, skins, chat UI)
 - `api/` - REST API (runs, credits, skins, leaderboards)
 - `worker/` - Deposit indexer (mints off-chain credits)
 - `contracts/` - Solidity deposit contract + deploy script
@@ -44,14 +44,36 @@ npm run dev --workspace=web
 ```
 PORT=4000
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/enochmusics
-REDIS_URL=redis://localhost:6379
+DATABASE_CA_PATH=/path/to/db/ca.pem
+DATABASE_CERT_PATH=/path/to/db/client-cert.pem
+DATABASE_KEY_PATH=/path/to/db/client-key.pem
+REDIS_URL=rediss://redis.example:6380
+REDIS_PASSWORD=change_me
+REDIS_CA_PATH=/path/to/redis/ca.pem
+REDIS_CERT_PATH=/path/to/redis/client-cert.pem
+REDIS_KEY_PATH=/path/to/redis/client-key.pem
+TLS_CERT_PATH=/path/to/api/tls-cert.pem
+TLS_KEY_PATH=/path/to/api/tls-key.pem
+TLS_CA_PATH=/path/to/api/ca.pem
+ENCRYPTION_KEYS=primary:BASE64_32BYTE_KEY,rotated:BASE64_32BYTE_KEY
+ALLOW_INSECURE_LOCAL=false
+ADMIN_API_KEY=change_me
 JWT_SECRET=dev_secret
 CHAIN_ID=11124
-RPC_URL=https://abstract-testnet-rpc.example
+RPC_URL=https://api.testnet.abs.xyz
 CONFIRMATIONS_REQUIRED=3
 DEPOSIT_CONTRACT_ADDRESS=0x0000000000000000000000000000000000000000
+SERVER_WALLET_ADDRESS=0x0000000000000000000000000000000000000000
+SERVER_WALLET_PRIVATE_KEY=0xabc123...
 DEFAULT_NOTE_SKIN_ID=1
 DEFAULT_GEAR_SKIN_ID=100
+MAX_RAW_SCORE=10000000
+MIN_RUN_DURATION_SECONDS=10
+MAX_RUN_DURATION_SECONDS=3600
+RUN_TIMEOUT_SECONDS=900
+RATE_LIMIT_WINDOW_MS=60000
+RATE_LIMIT_MAX=30
+RUN_CHECKSUM_SECRET=change_me
 CREDIT_PRICE_WEI=1000000000000000
 ```
 
@@ -59,29 +81,39 @@ CREDIT_PRICE_WEI=1000000000000000
 
 ```
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/enochmusics
+DATABASE_CA_PATH=/path/to/db/ca.pem
+DATABASE_CERT_PATH=/path/to/db/client-cert.pem
+DATABASE_KEY_PATH=/path/to/db/client-key.pem
+ENCRYPTION_KEYS=primary:BASE64_32BYTE_KEY,rotated:BASE64_32BYTE_KEY
+ALLOW_INSECURE_LOCAL=false
 CHAIN_ID=11124
-RPC_URL=https://abstract-testnet-rpc.example
+RPC_URL=https://api.testnet.abs.xyz
 CONFIRMATIONS_REQUIRED=3
 DEPOSIT_CONTRACT_ADDRESS=0x0000000000000000000000000000000000000000
 CREDIT_PRICE_WEI=1000000000000000
 ```
 
+### Leaderboards access
+Leaderboard reads are public, but score/ticket writes require authenticated gameplay requests.
+
 ### Web (`web/.env`)
 
 ```
-VITE_API_URL=http://localhost:4000
-VITE_CHAIN_ID=11124
-VITE_DEPOSIT_CONTRACT=0x0000000000000000000000000000000000000000
+VITE_API_URL=https://localhost:4000
 VITE_CREDIT_PRICE_WEI=1000000000000000
 VITE_UNITY_URL=https://example.com/unity/index.html
-VITE_CHAT_WS_URL=ws://localhost:4000
+VITE_CHAT_WS_URL=wss://api.testnet.abs.xyz/ws
+VITE_ALLOW_INSECURE_LOCAL=true
 ```
+
+### Gameplay notes
+Runs award raffle tickets as `credits_wagered * course_difficulty_weight` when cleared (individual song difficulty does not affect rewards).
 
 ### Contracts (`contracts/.env`)
 
 ```
 PRIVATE_KEY=0xabc123...
-RPC_URL=https://abstract-testnet-rpc.example
+RPC_URL=https://api.testnet.abs.xyz
 ```
 
 ## Testnet Usage Guide
@@ -98,4 +130,12 @@ RPC_URL=https://abstract-testnet-rpc.example
 
 - Credit price is fixed: **0.001 ETH = 1 Credit** (configurable via `CREDIT_PRICE_WEI`).
 - Credits are stored off-chain; the chain is only used for deposits.
+- The web client only talks to the API; the API signs deposit transactions with `SERVER_WALLET_PRIVATE_KEY` and the worker credits users by matching on `orderId`.
 - Backend is authoritative for runs, tickets, and skin equip.
+
+## Security Architecture & Encryption Model
+
+- **In-transit encryption:** API traffic must be HTTPS (TLS 1.2+), WebSocket traffic must be WSS, and backend services require TLS for Postgres and Redis. The API refuses to start without TLS certs unless `ALLOW_INSECURE_LOCAL=true` for localhost-only development. Clients validate TLS and do not downgrade to plaintext. 
+- **At-rest encryption:** Wallet addresses, credit balances, raffle ticket totals, and on-chain transaction references are encrypted using AES-256-GCM before being persisted. Encrypted values are stored alongside deterministic hashes (SHA-256) for lookup-only scenarios.
+- **Key management & rotation:** Encryption keys are provided via `ENCRYPTION_KEYS` (comma-separated `keyId:base64` values). The first key is used for new writes; older keys remain available for decryption to allow rotation without data loss. Keys are never hardcoded. 
+- **Auditability:** Services log when TLS connections are established for API, Postgres, and Redis, and log encryption/decryption failures without exposing sensitive payloads. 

@@ -29,6 +29,7 @@ const runAbortRefundRatio = Number(process.env.RUN_ABORT_REFUND_RATIO || 1);
 const rateLimitWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MS || 60000);
 const rateLimitMax = Number(process.env.RATE_LIMIT_MAX || 30);
 const creditPriceWei = BigInt(requireEnv('CREDIT_PRICE_WEI'));
+const runChecksumSecret = requireEnv('RUN_CHECKSUM_SECRET');
 const rpcUrl = requireEnv('RPC_URL');
 enforceTlsUrl(rpcUrl, 'RPC_URL');
 const depositContractAddress = requireEnv('DEPOSIT_CONTRACT_ADDRESS');
@@ -42,6 +43,13 @@ if (normalizeWalletAddress(serverSigner.address) !== serverWalletAddress) {
 const depositAbi = ['function deposit(bytes32 orderId) payable'];
 const erc721Abi = ['function ownerOf(uint256 tokenId) view returns (address)'];
 const depositContract = new ethers.Contract(depositContractAddress, depositAbi, serverSigner);
+
+const redisUrl = requireEnv('REDIS_URL');
+const redisPassword = requireEnv('REDIS_PASSWORD');
+enforceTlsUrl(redisUrl, 'REDIS_URL');
+const redisTls = loadClientTlsConfig('REDIS');
+const redisPub = new Redis(redisUrl, { password: redisPassword, tls: redisTls });
+const redisSub = new Redis(redisUrl, { password: redisPassword, tls: redisTls });
 
 function normalizeWalletAddress(value: string) {
   return value.toLowerCase();
@@ -57,25 +65,30 @@ function getWalletHash(wallet: string) {
 }
 
 function buildRunChecksum(runId: string, rawScore: number, runNonce: string) {
-  return hashValue(`${runId}:${rawScore}:${runNonce}`);
+  return crypto
+    .createHmac('sha256', runChecksumSecret)
+    .update(`${runId}:${rawScore}:${runNonce}`)
+    .digest('hex');
 }
 
 function rateLimit(scope: string) {
-  const hits = new Map<string, { count: number; resetAt: number }>();
-  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const key = `${scope}:${req.ip}`;
-    const now = Date.now();
-    const existing = hits.get(key);
-    if (!existing || existing.resetAt <= now) {
-      hits.set(key, { count: 1, resetAt: now + rateLimitWindowMs });
+  return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const key = `ratelimit:${scope}:${req.ip}`;
+    try {
+      const count = await redisPub.incr(key);
+      if (count === 1) {
+        await redisPub.pexpire(key, rateLimitWindowMs);
+      }
+      if (count > rateLimitMax) {
+        const ttl = await redisPub.pttl(key);
+        res.setHeader('Retry-After', Math.max(1, Math.ceil(ttl / 1000)));
+        return res.status(429).json({ error: 'rate limit exceeded' });
+      }
       return next();
+    } catch (error) {
+      console.error('rate limit error', error);
+      return res.status(503).json({ error: 'rate limit unavailable' });
     }
-    if (existing.count >= rateLimitMax) {
-      res.setHeader('Retry-After', Math.ceil((existing.resetAt - now) / 1000));
-      return res.status(429).json({ error: 'rate limit exceeded' });
-    }
-    existing.count += 1;
-    return next();
   };
 }
 
@@ -892,12 +905,6 @@ const server = insecureLocal
   ? createHttpServer(app)
   : createHttpsServer(loadServerTlsConfig(), app);
 const wss = new WebSocketServer({ server });
-const redisUrl = requireEnv('REDIS_URL');
-const redisPassword = requireEnv('REDIS_PASSWORD');
-enforceTlsUrl(redisUrl, 'REDIS_URL');
-const redisTls = loadClientTlsConfig('REDIS');
-const redisPub = new Redis(redisUrl, { password: redisPassword, tls: redisTls });
-const redisSub = new Redis(redisUrl, { password: redisPassword, tls: redisTls });
 const chatChannel = 'lobby-chat';
 
 if (insecureLocal) {

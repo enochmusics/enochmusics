@@ -7,9 +7,7 @@
     "build": "vite build",
     "preview": "vite preview"
   },
-  "dependencies": {
-    "ethers": "^6.12.1"
-  },
+  "dependencies": {},
   "devDependencies": {
     "vite": "^5.2.0"
   }

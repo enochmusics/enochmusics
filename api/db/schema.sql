@@ -1,8 +1,9 @@
 CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
-  wallet_address TEXT UNIQUE NOT NULL,
-  credit_balance INTEGER NOT NULL DEFAULT 0,
-  raffle_tickets_total INTEGER NOT NULL DEFAULT 0,
+  wallet_address_encrypted TEXT NOT NULL,
+  wallet_address_hash TEXT UNIQUE NOT NULL,
+  credit_balance_encrypted TEXT NOT NULL,
+  raffle_tickets_total_encrypted TEXT NOT NULL,
   equipped_note_skin_id INTEGER NOT NULL,
   equipped_gear_skin_id INTEGER NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -11,21 +12,22 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS credit_ledger (
   id SERIAL PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id),
-  delta INTEGER NOT NULL,
+  delta_encrypted TEXT NOT NULL,
   reason TEXT NOT NULL,
-  metadata JSONB,
+  metadata_encrypted TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS onchain_deposits (
   id SERIAL PRIMARY KEY,
   chain_id INTEGER NOT NULL,
-  tx_hash TEXT NOT NULL,
+  tx_hash_encrypted TEXT NOT NULL,
+  tx_hash_hash TEXT NOT NULL,
   log_index INTEGER NOT NULL,
-  amount_wei NUMERIC NOT NULL,
-  credits_minted INTEGER NOT NULL,
+  amount_wei_encrypted TEXT NOT NULL,
+  credits_minted_encrypted TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (chain_id, tx_hash, log_index)
+  UNIQUE (chain_id, tx_hash_hash, log_index)
 );
 
 CREATE TABLE IF NOT EXISTS runs (

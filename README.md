@@ -44,7 +44,19 @@ npm run dev --workspace=web
 ```
 PORT=4000
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/enochmusics
-REDIS_URL=redis://localhost:6379
+DATABASE_CA_PATH=/path/to/db/ca.pem
+DATABASE_CERT_PATH=/path/to/db/client-cert.pem
+DATABASE_KEY_PATH=/path/to/db/client-key.pem
+REDIS_URL=rediss://redis.example:6380
+REDIS_PASSWORD=change_me
+REDIS_CA_PATH=/path/to/redis/ca.pem
+REDIS_CERT_PATH=/path/to/redis/client-cert.pem
+REDIS_KEY_PATH=/path/to/redis/client-key.pem
+TLS_CERT_PATH=/path/to/api/tls-cert.pem
+TLS_KEY_PATH=/path/to/api/tls-key.pem
+TLS_CA_PATH=/path/to/api/ca.pem
+ENCRYPTION_KEYS=primary:BASE64_32BYTE_KEY,rotated:BASE64_32BYTE_KEY
+ALLOW_INSECURE_LOCAL=false
 JWT_SECRET=dev_secret
 CHAIN_ID=11124
 RPC_URL=https://abstract-testnet-rpc.example
@@ -59,6 +71,11 @@ CREDIT_PRICE_WEI=1000000000000000
 
 ```
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/enochmusics
+DATABASE_CA_PATH=/path/to/db/ca.pem
+DATABASE_CERT_PATH=/path/to/db/client-cert.pem
+DATABASE_KEY_PATH=/path/to/db/client-key.pem
+ENCRYPTION_KEYS=primary:BASE64_32BYTE_KEY,rotated:BASE64_32BYTE_KEY
+ALLOW_INSECURE_LOCAL=false
 CHAIN_ID=11124
 RPC_URL=https://abstract-testnet-rpc.example
 CONFIRMATIONS_REQUIRED=3
@@ -69,12 +86,13 @@ CREDIT_PRICE_WEI=1000000000000000
 ### Web (`web/.env`)
 
 ```
-VITE_API_URL=http://localhost:4000
+VITE_API_URL=https://localhost:4000
 VITE_CHAIN_ID=11124
 VITE_DEPOSIT_CONTRACT=0x0000000000000000000000000000000000000000
 VITE_CREDIT_PRICE_WEI=1000000000000000
 VITE_UNITY_URL=https://example.com/unity/index.html
-VITE_CHAT_WS_URL=ws://localhost:4000
+VITE_CHAT_WS_URL=wss://localhost:4000
+VITE_ALLOW_INSECURE_LOCAL=true
 ```
 
 ### Contracts (`contracts/.env`)
@@ -99,3 +117,10 @@ RPC_URL=https://abstract-testnet-rpc.example
 - Credit price is fixed: **0.001 ETH = 1 Credit** (configurable via `CREDIT_PRICE_WEI`).
 - Credits are stored off-chain; the chain is only used for deposits.
 - Backend is authoritative for runs, tickets, and skin equip.
+
+## Security Architecture & Encryption Model
+
+- **In-transit encryption:** API traffic must be HTTPS (TLS 1.2+), WebSocket traffic must be WSS, and backend services require TLS for Postgres and Redis. The API refuses to start without TLS certs unless `ALLOW_INSECURE_LOCAL=true` for localhost-only development. Clients validate TLS and do not downgrade to plaintext. 
+- **At-rest encryption:** Wallet addresses, credit balances, raffle ticket totals, and on-chain transaction references are encrypted using AES-256-GCM before being persisted. Encrypted values are stored alongside deterministic hashes (SHA-256) for lookup-only scenarios.
+- **Key management & rotation:** Encryption keys are provided via `ENCRYPTION_KEYS` (comma-separated `keyId:base64` values). The first key is used for new writes; older keys remain available for decryption to allow rotation without data loss. Keys are never hardcoded. 
+- **Auditability:** Services log when TLS connections are established for API, Postgres, and Redis, and log encryption/decryption failures without exposing sensitive payloads. 

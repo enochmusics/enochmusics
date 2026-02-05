@@ -6,7 +6,8 @@ const chainId = Number(import.meta.env.VITE_CHAIN_ID || 11124);
 const depositContract = import.meta.env.VITE_DEPOSIT_CONTRACT;
 const creditPriceWei = BigInt(import.meta.env.VITE_CREDIT_PRICE_WEI || '1000000000000000');
 const unityUrl = import.meta.env.VITE_UNITY_URL;
-const chatWsUrl = import.meta.env.VITE_CHAT_WS_URL || 'ws://localhost:4000';
+const chatWsUrl = import.meta.env.VITE_CHAT_WS_URL || 'wss://localhost:4000';
+const allowInsecureLocal = import.meta.env.VITE_ALLOW_INSECURE_LOCAL === 'true' || import.meta.env.DEV;
 
 const state = {
   walletAddress: null,
@@ -18,6 +19,37 @@ const state = {
 };
 
 const app = document.querySelector('#app');
+
+function isLocalhost(hostname) {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+}
+
+function enforceSecureUrl(rawUrl, label) {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch (error) {
+    throw new Error(`${label} must be a valid URL`);
+  }
+  if (parsed.protocol === 'https:' || parsed.protocol === 'wss:') {
+    return parsed.toString();
+  }
+  if (allowInsecureLocal && (parsed.protocol === 'http:' || parsed.protocol === 'ws:') && isLocalhost(parsed.hostname)) {
+    return parsed.toString();
+  }
+  throw new Error(`${label} must use TLS (https/wss).`);
+}
+
+let secureApiUrl;
+let secureChatWsUrl;
+try {
+  secureApiUrl = enforceSecureUrl(apiUrl, 'VITE_API_URL');
+  secureChatWsUrl = enforceSecureUrl(chatWsUrl, 'VITE_CHAT_WS_URL');
+} catch (error) {
+  console.error(error);
+  app.innerHTML = '<p class="muted">Secure connection required. Check your HTTPS/WSS configuration.</p>';
+  throw error;
+}
 
 app.innerHTML = `
   <div class="layout">
@@ -100,7 +132,7 @@ async function apiFetch(path, options = {}) {
   if (state.walletAddress) {
     headers['x-wallet-address'] = state.walletAddress;
   }
-  const response = await fetch(`${apiUrl}${path}`, { ...options, headers });
+  const response = await fetch(`${secureApiUrl}${path}`, { ...options, headers });
   if (!response.ok) {
     throw new Error(`${response.status}`);
   }
@@ -196,7 +228,7 @@ async function buyCredits() {
   const signer = await state.provider.getSigner();
   const depositAbi = ['function deposit(bytes32 orderId) payable'];
   const contract = new ethers.Contract(depositContract, depositAbi, signer);
-  await contract.deposit(order.orderId, { value: creditPriceWei });
+  chatSocket = new WebSocket(secureChatWsUrl);
   alert('Deposit sent. Credits will appear after confirmations.');
 }
 

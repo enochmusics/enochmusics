@@ -3,9 +3,13 @@ import express from 'express';
 import cors from 'cors';
 import { v4 as uuidv4 } from 'uuid';
 import { pool, query } from './db.js';
-import { createServer } from 'http';
+import { createServer as createHttpServer } from 'http';
+import { createServer as createHttpsServer } from 'https';
 import { WebSocketServer } from 'ws';
 import Redis from 'ioredis';
+import { decryptString, encryptString, hashValue } from './security/encryption.js';
+import { allowInsecureLocal, enforceTlsUrl, requireEnv } from './security/secrets.js';
+import { loadClientTlsConfig, loadServerTlsConfig } from './security/tls.js';
 
 const app = express();
 app.use(cors());
@@ -16,9 +20,17 @@ const baseTicketsPerClear = 1;
 const defaultNoteSkinId = Number(process.env.DEFAULT_NOTE_SKIN_ID || 1);
 const defaultGearSkinId = Number(process.env.DEFAULT_GEAR_SKIN_ID || 100);
 
+function normalizeWalletAddress(value: string) {
+  return value.toLowerCase();
+}
+
 function getWalletAddress(req: express.Request) {
   const headerWallet = req.header('x-wallet-address');
-  return headerWallet?.toLowerCase() ?? null;
+  return headerWallet ? normalizeWalletAddress(headerWallet) : null;
+}
+
+function getWalletHash(wallet: string) {
+  return hashValue(wallet);
 }
 
 async function ensureDefaultSkins() {
@@ -40,34 +52,80 @@ async function ensureUserDefaults(userId: number) {
   );
 }
 
+function decryptNumber(value: string, label: string) {
+  const parsed = Number(decryptString(value));
+  if (Number.isNaN(parsed)) {
+    throw new Error(`${label} decrypt failed`);
+  }
+  return parsed;
+}
+
+function mapUserRow(row: {
+  id: number;
+  wallet_address_encrypted: string;
+  credit_balance_encrypted: string;
+  raffle_tickets_total_encrypted: string;
+  equipped_note_skin_id: number;
+  equipped_gear_skin_id: number;
+}) {
+  return {
+    id: row.id,
+    wallet_address: decryptString(row.wallet_address_encrypted),
+    credit_balance: decryptNumber(row.credit_balance_encrypted, 'credit_balance'),
+    raffle_tickets_total: decryptNumber(row.raffle_tickets_total_encrypted, 'raffle_tickets_total'),
+    equipped_note_skin_id: row.equipped_note_skin_id,
+    equipped_gear_skin_id: row.equipped_gear_skin_id,
+  };
+}
+
 app.post('/auth/wallet-login', async (req, res) => {
-  const walletAddress = (req.body.walletAddress as string | undefined)?.toLowerCase();
+  const walletAddress = (req.body.walletAddress as string | undefined)
+    ? normalizeWalletAddress(req.body.walletAddress)
+    : undefined;
   if (!walletAddress) {
     return res.status(400).json({ error: 'walletAddress required' });
   }
 
   await ensureDefaultSkins();
+  const walletHash = getWalletHash(walletAddress);
+  const walletEncrypted = encryptString(walletAddress);
+  const creditBalanceEncrypted = encryptString('0');
+  const raffleTicketsEncrypted = encryptString('0');
 
   const upsert = await query<{ id: number }>(
-    `INSERT INTO users (wallet_address, equipped_note_skin_id, equipped_gear_skin_id)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (wallet_address)
-     DO UPDATE SET wallet_address = EXCLUDED.wallet_address
+    `INSERT INTO users (
+        wallet_address_encrypted,
+        wallet_address_hash,
+        credit_balance_encrypted,
+        raffle_tickets_total_encrypted,
+        equipped_note_skin_id,
+        equipped_gear_skin_id
+     )
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (wallet_address_hash)
+     DO UPDATE SET wallet_address_encrypted = EXCLUDED.wallet_address_encrypted
      RETURNING id`,
-    [walletAddress, defaultNoteSkinId, defaultGearSkinId]
+    [
+      walletEncrypted,
+      walletHash,
+      creditBalanceEncrypted,
+      raffleTicketsEncrypted,
+      defaultNoteSkinId,
+      defaultGearSkinId,
+    ]
   );
 
   const userId = upsert.rows[0].id;
   await ensureUserDefaults(userId);
 
   const user = await query(
-    `SELECT id, wallet_address, credit_balance, raffle_tickets_total,
+    `SELECT id, wallet_address_encrypted, credit_balance_encrypted, raffle_tickets_total_encrypted,
             equipped_note_skin_id, equipped_gear_skin_id
      FROM users WHERE id = $1`,
     [userId]
   );
 
-  return res.json({ user: user.rows[0] });
+  return res.json({ user: mapUserRow(user.rows[0]) });
 });
 
 app.get('/me', async (req, res) => {
@@ -75,16 +133,17 @@ app.get('/me', async (req, res) => {
   if (!wallet) {
     return res.status(401).json({ error: 'x-wallet-address required' });
   }
+  const walletHash = getWalletHash(wallet);
   const result = await query(
-    `SELECT id, wallet_address, credit_balance, raffle_tickets_total,
+    `SELECT id, wallet_address_encrypted, credit_balance_encrypted, raffle_tickets_total_encrypted,
             equipped_note_skin_id, equipped_gear_skin_id
-     FROM users WHERE wallet_address = $1`,
-    [wallet]
+     FROM users WHERE wallet_address_hash = $1`,
+    [walletHash]
   );
   if (result.rowCount === 0) {
     return res.status(404).json({ error: 'user not found' });
   }
-  return res.json({ user: result.rows[0] });
+  return res.json({ user: mapUserRow(result.rows[0]) });
 });
 
 app.post('/credits/create-order', async (req, res) => {
@@ -109,6 +168,7 @@ app.post('/runs/start', async (req, res) => {
   if (!wallet) {
     return res.status(401).json({ error: 'x-wallet-address required' });
   }
+  const walletHash = getWalletHash(wallet);
   const creditsWagered = Number(req.body.creditsWagered || 1);
   if (creditsWagered <= 0) {
     return res.status(400).json({ error: 'creditsWagered must be positive' });
@@ -118,27 +178,29 @@ app.post('/runs/start', async (req, res) => {
   try {
     await client.query('BEGIN');
     const userResult = await client.query(
-      'SELECT id, credit_balance FROM users WHERE wallet_address = $1 FOR UPDATE',
-      [wallet]
+      'SELECT id, credit_balance_encrypted FROM users WHERE wallet_address_hash = $1 FOR UPDATE',
+      [walletHash]
     );
     if (userResult.rowCount === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'user not found' });
     }
     const user = userResult.rows[0];
-    if (user.credit_balance < creditsWagered) {
+    const currentBalance = decryptNumber(user.credit_balance_encrypted, 'credit_balance');
+    if (currentBalance < creditsWagered) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'insufficient credits' });
     }
+    const updatedBalanceEncrypted = encryptString(String(currentBalance - creditsWagered));
 
     await client.query(
-      'UPDATE users SET credit_balance = credit_balance - $1 WHERE id = $2',
-      [creditsWagered, user.id]
+      'UPDATE users SET credit_balance_encrypted = $1 WHERE id = $2',
+      [updatedBalanceEncrypted, user.id]
     );
     await client.query(
-      `INSERT INTO credit_ledger (user_id, delta, reason, metadata)
+      `INSERT INTO credit_ledger (user_id, delta_encrypted, reason, metadata_encrypted)
        VALUES ($1, $2, 'run_start', $3)`,
-      [user.id, -creditsWagered, JSON.stringify({ creditsWagered })]
+      [user.id, encryptString(String(-creditsWagered)), encryptString(JSON.stringify({ creditsWagered }))]
     );
 
     const runId = uuidv4();
@@ -165,6 +227,7 @@ app.post('/runs/finish', async (req, res) => {
   if (!wallet) {
     return res.status(401).json({ error: 'x-wallet-address required' });
   }
+  const walletHash = getWalletHash(wallet);
 
   const runId = req.body.runId as string | undefined;
   const rawScore = Number(req.body.rawScore || 0);
@@ -179,7 +242,7 @@ app.post('/runs/finish', async (req, res) => {
     await client.query('BEGIN');
     const runResult = await client.query(
       `SELECT runs.run_id, runs.status, runs.multiplier_locked, runs.user_id,
-              users.wallet_address
+              users.wallet_address_hash
        FROM runs
        JOIN users ON users.id = runs.user_id
        WHERE runs.run_id = $1 FOR UPDATE`,
@@ -191,7 +254,7 @@ app.post('/runs/finish', async (req, res) => {
     }
 
     const run = runResult.rows[0];
-    if (run.wallet_address !== wallet) {
+    if (run.wallet_address_hash !== walletHash) {
       await client.query('ROLLBACK');
       return res.status(403).json({ error: 'run does not belong to wallet' });
     }
@@ -215,10 +278,20 @@ app.post('/runs/finish', async (req, res) => {
     );
 
     if (ticketsEarned > 0) {
-      await client.query(
-        'UPDATE users SET raffle_tickets_total = raffle_tickets_total + $1 WHERE id = $2',
-        [ticketsEarned, run.user_id]
+      const userRow = await client.query(
+        'SELECT raffle_tickets_total_encrypted FROM users WHERE id = $1 FOR UPDATE',
+        [run.user_id]
       );
+      if (userRow.rowCount === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'user not found' });
+      }
+      const currentTickets = decryptNumber(userRow.rows[0].raffle_tickets_total_encrypted, 'raffle_tickets_total');
+      const updatedTickets = encryptString(String(currentTickets + ticketsEarned));
+      await client.query('UPDATE users SET raffle_tickets_total_encrypted = $1 WHERE id = $2', [
+        updatedTickets,
+        run.user_id,
+      ]);
     }
 
     await client.query(
@@ -239,24 +312,33 @@ app.post('/runs/finish', async (req, res) => {
 
 app.get('/leaderboards/score', async (_req, res) => {
   const result = await query(
-    `SELECT users.wallet_address, runs.raw_score
+    `SELECT users.wallet_address_encrypted, runs.raw_score
      FROM runs
      JOIN users ON users.id = runs.user_id
      WHERE runs.raw_score IS NOT NULL
      ORDER BY runs.raw_score DESC
      LIMIT 50`
   );
-  return res.json({ leaderboard: result.rows });
+  const leaderboard = result.rows.map((row) => ({
+    wallet_address: decryptString(row.wallet_address_encrypted),
+    raw_score: row.raw_score,
+  }));
+  return res.json({ leaderboard });
 });
 
 app.get('/leaderboards/tickets', async (_req, res) => {
   const result = await query(
-    `SELECT wallet_address, raffle_tickets_total
-     FROM users
-     ORDER BY raffle_tickets_total DESC
-     LIMIT 50`
+    `SELECT wallet_address_encrypted, raffle_tickets_total_encrypted
+     FROM users`
   );
-  return res.json({ leaderboard: result.rows });
+  const leaderboard = result.rows
+    .map((row) => ({
+      wallet_address: decryptString(row.wallet_address_encrypted),
+      raffle_tickets_total: decryptNumber(row.raffle_tickets_total_encrypted, 'raffle_tickets_total'),
+    }))
+    .sort((a, b) => b.raffle_tickets_total - a.raffle_tickets_total)
+    .slice(0, 50);
+  return res.json({ leaderboard });
 });
 
 app.get('/skins/available', async (req, res) => {
@@ -264,7 +346,11 @@ app.get('/skins/available', async (req, res) => {
   if (!wallet) {
     return res.status(401).json({ error: 'x-wallet-address required' });
   }
-  const userResult = await query('SELECT id, equipped_note_skin_id, equipped_gear_skin_id FROM users WHERE wallet_address = $1', [wallet]);
+  const walletHash = getWalletHash(wallet);
+  const userResult = await query(
+    'SELECT id, equipped_note_skin_id, equipped_gear_skin_id FROM users WHERE wallet_address_hash = $1',
+    [walletHash]
+  );
   if (userResult.rowCount === 0) {
     return res.status(404).json({ error: 'user not found' });
   }
@@ -284,7 +370,8 @@ app.post('/skins/refresh', async (req, res) => {
   if (!wallet) {
     return res.status(401).json({ error: 'x-wallet-address required' });
   }
-  const userResult = await query('SELECT id FROM users WHERE wallet_address = $1', [wallet]);
+  const walletHash = getWalletHash(wallet);
+  const userResult = await query('SELECT id FROM users WHERE wallet_address_hash = $1', [walletHash]);
   if (userResult.rowCount === 0) {
     return res.status(404).json({ error: 'user not found' });
   }
@@ -302,7 +389,8 @@ app.post('/skins/equip', async (req, res) => {
   if (!skinId || !skinType) {
     return res.status(400).json({ error: 'skinId and skinType required' });
   }
-  const userResult = await query('SELECT id FROM users WHERE wallet_address = $1', [wallet]);
+  const walletHash = getWalletHash(wallet);
+  const userResult = await query('SELECT id FROM users WHERE wallet_address_hash = $1', [walletHash]);
   if (userResult.rowCount === 0) {
     return res.status(404).json({ error: 'user not found' });
   }
@@ -323,12 +411,33 @@ app.post('/skins/equip', async (req, res) => {
   return res.json({ status: 'equipped' });
 });
 
-const server = createServer(app);
+const insecureLocal = allowInsecureLocal() && process.env.NODE_ENV !== 'production';
+const server = insecureLocal
+  ? createHttpServer(app)
+  : createHttpsServer(loadServerTlsConfig(), app);
 const wss = new WebSocketServer({ server });
-const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
-const redisPub = new Redis(redisUrl);
-const redisSub = new Redis(redisUrl);
+const redisUrl = requireEnv('REDIS_URL');
+const redisPassword = requireEnv('REDIS_PASSWORD');
+enforceTlsUrl(redisUrl, 'REDIS_URL');
+const redisTls = loadClientTlsConfig('REDIS');
+const redisPub = new Redis(redisUrl, { password: redisPassword, tls: redisTls });
+const redisSub = new Redis(redisUrl, { password: redisPassword, tls: redisTls });
 const chatChannel = 'lobby-chat';
+
+if (insecureLocal) {
+  console.warn('HTTP/Ws enabled for local development only.');
+} else {
+  server.on('secureConnection', () => {
+    console.log('HTTPS TLS connection established');
+  });
+}
+
+redisPub.on('ready', () => {
+  console.log('Redis TLS connection established (pub)');
+});
+redisSub.on('ready', () => {
+  console.log('Redis TLS connection established (sub)');
+});
 
 redisSub.subscribe(chatChannel);
 

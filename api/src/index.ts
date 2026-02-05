@@ -25,7 +25,6 @@ const maxRawScore = Number(process.env.MAX_RAW_SCORE || 10000000);
 const minRunDurationSeconds = Number(process.env.MIN_RUN_DURATION_SECONDS || 10);
 const maxRunDurationSeconds = Number(process.env.MAX_RUN_DURATION_SECONDS || 3600);
 const runTimeoutSeconds = Number(process.env.RUN_TIMEOUT_SECONDS || 900);
-const runAbortRefundRatio = Number(process.env.RUN_ABORT_REFUND_RATIO || 1);
 const rateLimitWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MS || 60000);
 const rateLimitMax = Number(process.env.RATE_LIMIT_MAX || 30);
 const creditPriceWei = BigInt(requireEnv('CREDIT_PRICE_WEI'));
@@ -384,26 +383,12 @@ app.post('/runs/start', rateLimit('runs'), async (req, res) => {
       const runAgeSeconds =
         (Date.now() - new Date(activeRun.rows[0].created_at as string).getTime()) / 1000;
       if (runAgeSeconds >= runTimeoutSeconds) {
-        const refundRatio = Math.max(0, Math.min(1, runAbortRefundRatio));
-        const refundCredits = Math.max(0, Math.floor(activeRun.rows[0].credits_wagered * refundRatio));
         await client.query(
           `UPDATE runs
            SET status = 'aborted', aborted_at = NOW()
            WHERE run_id = $1`,
           [activeRun.rows[0].run_id]
         );
-        if (refundCredits > 0) {
-          currentBalance += refundCredits;
-          await client.query('UPDATE users SET credit_balance_encrypted = $1 WHERE id = $2', [
-            encryptString(String(currentBalance)),
-            user.id,
-          ]);
-          await client.query(
-            `INSERT INTO credit_ledger (user_id, delta_encrypted, reason, metadata_encrypted)
-             VALUES ($1, $2, 'run_abort_refund', $3)`,
-            [user.id, encryptString(String(refundCredits)), encryptString(JSON.stringify({ reason: 'timeout' }))]
-          );
-        }
       } else {
         await client.query('ROLLBACK');
         return res.status(409).json({ error: 'run already in progress' });
@@ -614,21 +599,6 @@ app.post('/runs/abort', rateLimit('runs'), async (req, res) => {
       return res.status(400).json({ error: 'run is not active' });
     }
 
-    const refundRatio = Math.max(0, Math.min(1, runAbortRefundRatio));
-    const refundCredits = Math.max(0, Math.floor(run.credits_wagered * refundRatio));
-    if (refundCredits > 0) {
-      const currentBalance = decryptNumber(run.credit_balance_encrypted, 'credit_balance');
-      await client.query('UPDATE users SET credit_balance_encrypted = $1 WHERE id = $2', [
-        encryptString(String(currentBalance + refundCredits)),
-        run.user_id,
-      ]);
-      await client.query(
-        `INSERT INTO credit_ledger (user_id, delta_encrypted, reason, metadata_encrypted)
-         VALUES ($1, $2, 'run_abort_refund', $3)`,
-        [run.user_id, encryptString(String(refundCredits)), encryptString(JSON.stringify({ reason: 'abort' }))]
-      );
-    }
-
     await client.query(
       `UPDATE runs
        SET status = 'aborted', aborted_at = NOW()
@@ -637,7 +607,7 @@ app.post('/runs/abort', rateLimit('runs'), async (req, res) => {
     );
 
     await client.query('COMMIT');
-    return res.json({ runId, status: 'aborted', refundedCredits: refundCredits });
+    return res.json({ runId, status: 'aborted', refundedCredits: 0 });
   } catch (error) {
     await client.query('ROLLBACK');
     return res.status(500).json({ error: 'run abort failed' });

@@ -201,7 +201,7 @@ x-wallet-address: 0xabc...
 ## 6) 게임 중단
 
 ### `POST /runs/abort`
-**목적:** 유저가 게임을 중단할 때 run을 종료하고 환불 정책을 적용합니다.
+**목적:** 유저가 게임을 중단할 때 run을 종료합니다. (크레딧은 환불되지 않습니다.)
 
 **Headers**
 ```
@@ -220,7 +220,7 @@ x-wallet-address: 0xabc...
 {
   "runId": "<uuid>",
   "status": "aborted",
-  "refundedCredits": 1
+  "refundedCredits": 0
 }
 ```
 
@@ -346,4 +346,3 @@ x-wallet-address: 0xabc...
 4. **게임 종료**: `/runs/finish`
 5. **스킨 조회/장착**: `/skins/available` → `/skins/equip`
 6. **리더보드 조회**: `/leaderboards/score` or `/leaderboards/tickets`
-

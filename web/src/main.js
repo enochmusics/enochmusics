@@ -49,29 +49,53 @@ app.innerHTML = `
   <div class="layout">
     <header class="header">
       <div>
-        <h1>Enoch Musics MVP</h1>
-        <p>Web3 rhythm game lobby & controls</p>
+        <p class="eyebrow">Hub / Lobby</p>
+        <h1>Enoch Musics Command Center</h1>
+        <p class="muted">Manage your wallet, credits, skins, and rankings before launching a run.</p>
       </div>
       <div class="wallet">
+        <div class="wallet-status">
+          <span class="status-dot" id="walletStatusDot"></span>
+          <span id="walletStatusText">Disconnected</span>
+        </div>
         <button id="connectWallet">Connect Account</button>
         <div id="walletAddress" class="muted"></div>
       </div>
     </header>
 
-    <section class="panel">
-      <h2>Credits</h2>
-      <div class="row">
-        <div>Balance: <span id="creditBalance">0</span></div>
-        <button id="buyCredits">Buy 1 Credit (0.001 ETH)</button>
+    <section class="panel grid">
+      <div class="card">
+        <h2>Wallet</h2>
+        <p class="muted">Server-managed wallet session for gameplay and purchases.</p>
+        <div class="stat">
+          <span>Account</span>
+          <strong id="walletSummary">Not connected</strong>
+        </div>
+        <div class="stat">
+          <span>Credits</span>
+          <strong><span id="creditBalance">0</span> available</strong>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Credits Store</h2>
+        <p class="muted">Purchase credits from the server. Credits appear after confirmations.</p>
+        <div class="row">
+          <button id="buyCredits">Buy 1 Credit (0.001 ETH)</button>
+          <span id="purchaseStatus" class="muted">No purchase yet.</span>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Launch Game</h2>
+        <p class="muted">Unity WebGL handles live gameplay only.</p>
+        <div class="row">
+          <button id="launchUnity">Launch Unity WebGL</button>
+          <span class="muted">Unity URL: ${unityUrl}</span>
+        </div>
       </div>
     </section>
 
     <section class="panel">
-      <h2>Play</h2>
-      <div class="row">
-        <button id="launchUnity">Launch Unity WebGL</button>
-        <span class="muted">Unity URL: ${unityUrl}</span>
-      </div>
+      <h2>Unity WebGL - Gameplay Client</h2>
       <iframe id="unityFrame" title="Unity WebGL" class="unity" src="${unityUrl}"></iframe>
     </section>
 
@@ -87,7 +111,8 @@ app.innerHTML = `
     </section>
 
     <section class="panel">
-      <h2>NFT Skins</h2>
+      <h2>Skins Hub</h2>
+      <p class="muted">Equip skins in the lobby before your next run.</p>
       <div id="skins" class="skins"></div>
     </section>
 
@@ -107,7 +132,11 @@ app.innerHTML = `
 const connectBtn = document.querySelector('#connectWallet');
 const walletLabel = document.querySelector('#walletAddress');
 const creditBalanceLabel = document.querySelector('#creditBalance');
+const walletSummary = document.querySelector('#walletSummary');
+const walletStatusDot = document.querySelector('#walletStatusDot');
+const walletStatusText = document.querySelector('#walletStatusText');
 const buyCreditsBtn = document.querySelector('#buyCredits');
+const purchaseStatus = document.querySelector('#purchaseStatus');
 const scoreLeaderboard = document.querySelector('#scoreLeaderboard');
 const ticketLeaderboard = document.querySelector('#ticketLeaderboard');
 const skinsContainer = document.querySelector('#skins');
@@ -185,15 +214,21 @@ async function refreshMe() {
   if (!state.walletAddress) return;
   const me = await apiFetch('/me');
   creditBalanceLabel.textContent = me.user.credit_balance;
+  walletSummary.textContent = me.user.wallet_address;
 }
 
 async function connectWallet() {
+  purchaseStatus.textContent = 'Connecting...';
   const response = await apiFetch('/auth/server-login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
   });
   state.walletAddress = response.user.wallet_address;
   walletLabel.textContent = state.walletAddress;
+  walletSummary.textContent = state.walletAddress;
+  walletStatusDot.classList.add('active');
+  walletStatusText.textContent = 'Connected';
+  purchaseStatus.textContent = 'Ready to purchase credits.';
 
   await refreshMe();
   await loadSkins();
@@ -204,7 +239,9 @@ async function buyCredits() {
     alert('Connect account first');
     return;
   }
+  purchaseStatus.textContent = 'Sending deposit...';
   const order = await apiFetch('/credits/buy', { method: 'POST' });
+  purchaseStatus.textContent = `Deposit sent. Tx: ${order.txHash}`;
   alert(`Deposit sent. Credits will appear after confirmations.\nTx: ${order.txHash}`);
 
 connectBtn.addEventListener('click', connectWallet);

@@ -24,11 +24,66 @@ body {
   gap: 16px;
 }
 
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  font-size: 12px;
+  color: #7c8aa5;
+  margin: 0 0 8px;
+}
+
+.wallet {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.wallet-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #4a5568;
+  display: inline-block;
+}
+
+.status-dot.active {
+  background: #22c55e;
+}
+
 .panel {
   background: #111826;
   border: 1px solid #1f2a3a;
   border-radius: 12px;
   padding: 20px;
+}
+
+.card {
+  background: #0f1522;
+  border: 1px solid #1f2a3a;
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.stat {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: #0b111c;
+  border: 1px solid #1f2a3a;
 }
 
 .grid {

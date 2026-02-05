@@ -107,6 +107,9 @@ VITE_CHAT_WS_URL=wss://api.testnet.abs.xyz/ws
 VITE_ALLOW_INSECURE_LOCAL=true
 ```
 
+### Gameplay notes
+Runs award raffle tickets as `credits_wagered * difficulty_weight` when cleared.
+
 ### Contracts (`contracts/.env`)
 
 ```

@@ -453,6 +453,7 @@ app.post('/runs/finish', rateLimit('runs'), async (req, res) => {
   const runNonce = req.body.runNonce as string | undefined;
   const checksum = req.body.checksum as string | undefined;
   const cleared = Boolean(req.body.cleared);
+  const difficulty = (req.body.difficulty as string | undefined) || 'easy';
 
   if (!runId) {
     return res.status(400).json({ error: 'runId required' });
@@ -463,7 +464,7 @@ app.post('/runs/finish', rateLimit('runs'), async (req, res) => {
     await client.query('BEGIN');
     const runResult = await client.query(
       `SELECT runs.run_id, runs.status, runs.multiplier_locked, runs.user_id,
-              runs.created_at, runs.run_nonce, users.wallet_address_hash
+              runs.created_at, runs.run_nonce, runs.credits_wagered, users.wallet_address_hash
        FROM runs
        JOIN users ON users.id = runs.user_id
        WHERE runs.run_id = $1 FOR UPDATE`,
@@ -519,7 +520,18 @@ app.post('/runs/finish', rateLimit('runs'), async (req, res) => {
       return res.status(400).json({ error: 'run duration exceeded maximum' });
     }
 
-    const ticketsEarned = cleared ? baseTicketsPerClear * run.multiplier_locked : 0;
+    const difficultyWeights: Record<string, number> = {
+      easy: 1,
+      normal: 2,
+      hard: 3,
+      extreme: 5,
+    };
+    const weight = difficultyWeights[difficulty.toLowerCase()];
+    if (!weight) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'invalid difficulty' });
+    }
+    const ticketsEarned = cleared ? run.credits_wagered * weight : 0;
 
     await client.query(
       `UPDATE runs

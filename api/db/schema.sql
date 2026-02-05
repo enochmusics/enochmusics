@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS onchain_deposits (
   tx_hash_encrypted TEXT NOT NULL,
   tx_hash_hash TEXT NOT NULL,
   log_index INTEGER NOT NULL,
+  order_id_hash TEXT,
   amount_wei_encrypted TEXT NOT NULL,
   credits_minted_encrypted TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -49,6 +50,10 @@ CREATE TABLE IF NOT EXISTS runs (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   finished_at TIMESTAMPTZ
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS runs_active_user_unique
+  ON runs (user_id)
+  WHERE status = 'started';
 
 CREATE TABLE IF NOT EXISTS leaderboards_cache (
   id SERIAL PRIMARY KEY,

@@ -135,6 +135,7 @@ async function processDeposits() {
       const txHash = log.transactionHash;
       const txHashHash = hashValue(txHash);
       const txHashEncrypted = encryptString(txHash);
+      const orderIdHash = orderId ? hashValue(orderId) : null;
       const amountWeiEncrypted = encryptString(amountWei.toString());
       const creditsEncrypted = encryptString(String(creditsToMint));
       const insertResult = await client.query(
@@ -143,13 +144,14 @@ async function processDeposits() {
             tx_hash_encrypted,
             tx_hash_hash,
             log_index,
+            order_id_hash,
             amount_wei_encrypted,
             credits_minted_encrypted
          )
-         VALUES ($1, $2, $3, $4, $5, $6)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (chain_id, tx_hash_hash, log_index) DO NOTHING
          RETURNING id`,
-        [chainId, txHashEncrypted, txHashHash, log.index, amountWeiEncrypted, creditsEncrypted]
+        [chainId, txHashEncrypted, txHashHash, log.index, orderIdHash, amountWeiEncrypted, creditsEncrypted]
       );
       if (insertResult.rowCount > 0) {
         const balanceResult = await client.query(

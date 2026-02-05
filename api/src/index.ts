@@ -175,23 +175,12 @@ app.post('/credits/create-order', async (req, res) => {
   if (!wallet) {
     return res.status(401).json({ error: 'x-wallet-address required' });
   }
-  const orderId = uuidv4();
-  return res.json({ orderId });
-});
-
-app.post('/credits/buy', async (req, res) => {
-  const wallet = getWalletAddress(req);
-  if (!wallet) {
-    return res.status(401).json({ error: 'x-wallet-address required' });
-  }
-  if (wallet !== serverWalletAddress) {
-    return res.status(403).json({ error: 'wallet not authorized for server purchases' });
-  }
   const walletHash = getWalletHash(wallet);
   const userResult = await query('SELECT id FROM users WHERE wallet_address_hash = $1', [walletHash]);
   if (userResult.rowCount === 0) {
     return res.status(404).json({ error: 'user not found' });
   }
+
   const orderId = uuidv4();
   const orderIdBytes32 = ethers.id(orderId);
   const orderIdHash = hashValue(orderIdBytes32);
@@ -203,6 +192,31 @@ app.post('/credits/buy', async (req, res) => {
     [userResult.rows[0].id, encryptString(orderIdBytes32), orderIdHash]
   );
 
+  return res.json({ orderId, orderIdBytes32 });
+});
+
+app.post('/credits/buy', async (req, res) => {
+  const wallet = getWalletAddress(req);
+  if (!wallet) {
+    return res.status(401).json({ error: 'x-wallet-address required' });
+  }
+  if (wallet !== serverWalletAddress) {
+    return res.status(403).json({ error: 'wallet not authorized for server purchases' });
+  }
+  const orderId = req.body.orderId as string | undefined;
+  if (!orderId) {
+    return res.status(400).json({ error: 'orderId required' });
+  }
+  const orderIdBytes32 = ethers.id(orderId);
+  const orderIdHash = hashValue(orderIdBytes32);
+  const orderResult = await query(
+    'SELECT id FROM credit_orders WHERE order_id_hash = $1',
+    [orderIdHash]
+  );
+  if (orderResult.rowCount === 0) {
+    return res.status(404).json({ error: 'order not found' });
+  }
+
   const tx = await depositContract.deposit(orderIdBytes32, { value: creditPriceWei });
   return res.json({ orderId, orderIdBytes32, txHash: tx.hash });
 });
@@ -211,6 +225,22 @@ app.get('/credits/order-status', async (req, res) => {
   const orderId = req.query.orderId as string | undefined;
   if (!orderId) {
     return res.status(400).json({ error: 'orderId required' });
+  }
+  const orderIdBytes32 = ethers.id(orderId);
+  const orderIdHash = hashValue(orderIdBytes32);
+  const orderResult = await query(
+    'SELECT id FROM credit_orders WHERE order_id_hash = $1',
+    [orderIdHash]
+  );
+  if (orderResult.rowCount === 0) {
+    return res.json({ orderId, status: 'not_found' });
+  }
+  const depositResult = await query(
+    'SELECT 1 FROM onchain_deposits WHERE order_id_hash = $1 LIMIT 1',
+    [orderIdHash]
+  );
+  if (depositResult.rowCount > 0) {
+    return res.json({ orderId, status: 'confirmed' });
   }
   return res.json({ orderId, status: 'pending' });
 });
@@ -242,6 +272,14 @@ app.post('/runs/start', async (req, res) => {
     if (currentBalance < creditsWagered) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'insufficient credits' });
+    }
+    const activeRun = await client.query(
+      'SELECT run_id FROM runs WHERE user_id = $1 AND status = $2 LIMIT 1 FOR UPDATE',
+      [user.id, 'started']
+    );
+    if (activeRun.rowCount > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'run already in progress' });
     }
     const updatedBalanceEncrypted = encryptString(String(currentBalance - creditsWagered));
 

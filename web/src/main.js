@@ -239,8 +239,13 @@ async function buyCredits() {
     alert('Connect account first');
     return;
   }
+  purchaseStatus.textContent = 'Creating order...';
+  const orderRequest = await apiFetch('/credits/create-order', { method: 'POST' });
   purchaseStatus.textContent = 'Sending deposit...';
-  const order = await apiFetch('/credits/buy', { method: 'POST' });
+  const order = await apiFetch('/credits/buy', {
+    method: 'POST',
+    body: JSON.stringify({ orderId: orderRequest.orderId }),
+  });
   purchaseStatus.textContent = `Deposit sent. Tx: ${order.txHash}`;
   alert(`Deposit sent. Credits will appear after confirmations.\nTx: ${order.txHash}`);
 

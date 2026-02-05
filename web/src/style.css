@@ -1,0 +1,142 @@
+:root {
+  font-family: 'Inter', sans-serif;
+  background: #0b0f14;
+  color: #e6edf3;
+}
+
+body {
+  margin: 0;
+}
+
+.layout {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+.panel {
+  background: #111826;
+  border: 1px solid #1f2a3a;
+  border-radius: 12px;
+  padding: 20px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 24px;
+}
+
+.row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+button {
+  background: #4f46e5;
+  border: none;
+  color: white;
+  padding: 10px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+button:disabled {
+  background: #303548;
+  cursor: not-allowed;
+}
+
+.muted {
+  color: #9aa4b2;
+}
+
+.unity {
+  width: 100%;
+  min-height: 420px;
+  border: 1px solid #1f2a3a;
+  border-radius: 12px;
+  margin-top: 12px;
+}
+
+.leaderboard {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.skins {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.skin {
+  background: #0f1522;
+  border: 1px solid #1f2a3a;
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.skin-title {
+  font-weight: 600;
+}
+
+.badge {
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.badge-ok {
+  background: #1f8f3c;
+}
+
+.badge-locked {
+  background: #4a5568;
+}
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chat-log {
+  min-height: 140px;
+  max-height: 200px;
+  overflow-y: auto;
+  background: #0f1522;
+  border: 1px solid #1f2a3a;
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+input {
+  background: #0f1522;
+  border: 1px solid #1f2a3a;
+  border-radius: 8px;
+  color: #e6edf3;
+  padding: 8px 12px;
+  flex: 1;
+}

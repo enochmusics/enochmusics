@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { v4 as uuidv4 } from 'uuid';
+import crypto from 'crypto';
 import { ethers } from 'ethers';
 import { pool, query } from './db.js';
 import { createServer as createHttpServer } from 'http';
@@ -22,6 +23,11 @@ const defaultNoteSkinId = Number(process.env.DEFAULT_NOTE_SKIN_ID || 1);
 const defaultGearSkinId = Number(process.env.DEFAULT_GEAR_SKIN_ID || 100);
 const maxRawScore = Number(process.env.MAX_RAW_SCORE || 10000000);
 const minRunDurationSeconds = Number(process.env.MIN_RUN_DURATION_SECONDS || 10);
+const maxRunDurationSeconds = Number(process.env.MAX_RUN_DURATION_SECONDS || 3600);
+const runTimeoutSeconds = Number(process.env.RUN_TIMEOUT_SECONDS || 900);
+const runAbortRefundRatio = Number(process.env.RUN_ABORT_REFUND_RATIO || 1);
+const rateLimitWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MS || 60000);
+const rateLimitMax = Number(process.env.RATE_LIMIT_MAX || 30);
 const creditPriceWei = BigInt(requireEnv('CREDIT_PRICE_WEI'));
 const rpcUrl = requireEnv('RPC_URL');
 enforceTlsUrl(rpcUrl, 'RPC_URL');
@@ -48,6 +54,29 @@ function getWalletAddress(req: express.Request) {
 
 function getWalletHash(wallet: string) {
   return hashValue(wallet);
+}
+
+function buildRunChecksum(runId: string, rawScore: number, runNonce: string) {
+  return hashValue(`${runId}:${rawScore}:${runNonce}`);
+}
+
+function rateLimit(scope: string) {
+  const hits = new Map<string, { count: number; resetAt: number }>();
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const key = `${scope}:${req.ip}`;
+    const now = Date.now();
+    const existing = hits.get(key);
+    if (!existing || existing.resetAt <= now) {
+      hits.set(key, { count: 1, resetAt: now + rateLimitWindowMs });
+      return next();
+    }
+    if (existing.count >= rateLimitMax) {
+      res.setHeader('Retry-After', Math.ceil((existing.resetAt - now) / 1000));
+      return res.status(429).json({ error: 'rate limit exceeded' });
+    }
+    existing.count += 1;
+    return next();
+  };
 }
 
 async function ensureDefaultSkins() {
@@ -196,7 +225,7 @@ async function ensureUserForWallet(walletAddress: string) {
   return mapUserRow(user.rows[0]);
 }
 
-app.post('/auth/wallet-login', async (req, res) => {
+app.post('/auth/wallet-login', rateLimit('auth'), async (req, res) => {
   const walletAddress = (req.body.walletAddress as string | undefined)
     ? normalizeWalletAddress(req.body.walletAddress)
     : undefined;
@@ -208,7 +237,7 @@ app.post('/auth/wallet-login', async (req, res) => {
   return res.json({ user });
 });
 
-app.post('/auth/server-login', async (_req, res) => {
+app.post('/auth/server-login', rateLimit('auth'), async (_req, res) => {
   const user = await ensureUserForWallet(serverWalletAddress);
   return res.json({ user });
 });
@@ -231,7 +260,7 @@ app.get('/me', async (req, res) => {
   return res.json({ user: mapUserRow(result.rows[0]) });
 });
 
-app.post('/credits/create-order', async (req, res) => {
+app.post('/credits/create-order', rateLimit('credits'), async (req, res) => {
   const wallet = getWalletAddress(req);
   if (!wallet) {
     return res.status(401).json({ error: 'x-wallet-address required' });
@@ -256,7 +285,7 @@ app.post('/credits/create-order', async (req, res) => {
   return res.json({ orderId, orderIdBytes32 });
 });
 
-app.post('/credits/buy', async (req, res) => {
+app.post('/credits/buy', rateLimit('credits'), async (req, res) => {
   const wallet = getWalletAddress(req);
   if (!wallet) {
     return res.status(401).json({ error: 'x-wallet-address required' });
@@ -306,7 +335,7 @@ app.get('/credits/order-status', async (req, res) => {
   return res.json({ orderId, status: 'pending' });
 });
 
-app.post('/runs/start', async (req, res) => {
+app.post('/runs/start', rateLimit('runs'), async (req, res) => {
   const wallet = getWalletAddress(req);
   if (!wallet) {
     return res.status(401).json({ error: 'x-wallet-address required' });
@@ -329,18 +358,43 @@ app.post('/runs/start', async (req, res) => {
       return res.status(404).json({ error: 'user not found' });
     }
     const user = userResult.rows[0];
-    const currentBalance = decryptNumber(user.credit_balance_encrypted, 'credit_balance');
+    let currentBalance = decryptNumber(user.credit_balance_encrypted, 'credit_balance');
     if (currentBalance < creditsWagered) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'insufficient credits' });
     }
     const activeRun = await client.query(
-      'SELECT run_id FROM runs WHERE user_id = $1 AND status = $2 LIMIT 1 FOR UPDATE',
+      'SELECT run_id, created_at, credits_wagered FROM runs WHERE user_id = $1 AND status = $2 LIMIT 1 FOR UPDATE',
       [user.id, 'started']
     );
     if (activeRun.rowCount > 0) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'run already in progress' });
+      const runAgeSeconds =
+        (Date.now() - new Date(activeRun.rows[0].created_at as string).getTime()) / 1000;
+      if (runAgeSeconds >= runTimeoutSeconds) {
+        const refundRatio = Math.max(0, Math.min(1, runAbortRefundRatio));
+        const refundCredits = Math.max(0, Math.floor(activeRun.rows[0].credits_wagered * refundRatio));
+        await client.query(
+          `UPDATE runs
+           SET status = 'aborted', aborted_at = NOW()
+           WHERE run_id = $1`,
+          [activeRun.rows[0].run_id]
+        );
+        if (refundCredits > 0) {
+          currentBalance += refundCredits;
+          await client.query('UPDATE users SET credit_balance_encrypted = $1 WHERE id = $2', [
+            encryptString(String(currentBalance)),
+            user.id,
+          ]);
+          await client.query(
+            `INSERT INTO credit_ledger (user_id, delta_encrypted, reason, metadata_encrypted)
+             VALUES ($1, $2, 'run_abort_refund', $3)`,
+            [user.id, encryptString(String(refundCredits)), encryptString(JSON.stringify({ reason: 'timeout' }))]
+          );
+        }
+      } else {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'run already in progress' });
+      }
     }
     const updatedBalanceEncrypted = encryptString(String(currentBalance - creditsWagered));
 
@@ -355,16 +409,17 @@ app.post('/runs/start', async (req, res) => {
     );
 
     const runId = uuidv4();
+    const runNonce = crypto.randomBytes(16).toString('hex');
     const multiplierLocked = 1;
 
     await client.query(
-      `INSERT INTO runs (run_id, user_id, multiplier_locked)
-       VALUES ($1, $2, $3)`,
-      [runId, user.id, multiplierLocked]
+      `INSERT INTO runs (run_id, user_id, multiplier_locked, run_nonce, credits_wagered)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [runId, user.id, multiplierLocked, runNonce, creditsWagered]
     );
 
     await client.query('COMMIT');
-    return res.json({ runId, multiplierLocked });
+    return res.json({ runId, multiplierLocked, runNonce });
   } catch (error) {
     await client.query('ROLLBACK');
     return res.status(500).json({ error: 'run start failed' });
@@ -373,7 +428,7 @@ app.post('/runs/start', async (req, res) => {
   }
 });
 
-app.post('/runs/finish', async (req, res) => {
+app.post('/runs/finish', rateLimit('runs'), async (req, res) => {
   const wallet = getWalletAddress(req);
   if (!wallet) {
     return res.status(401).json({ error: 'x-wallet-address required' });
@@ -382,6 +437,8 @@ app.post('/runs/finish', async (req, res) => {
 
   const runId = req.body.runId as string | undefined;
   const rawScore = Number(req.body.rawScore || 0);
+  const runNonce = req.body.runNonce as string | undefined;
+  const checksum = req.body.checksum as string | undefined;
   const cleared = Boolean(req.body.cleared);
 
   if (!runId) {
@@ -393,7 +450,7 @@ app.post('/runs/finish', async (req, res) => {
     await client.query('BEGIN');
     const runResult = await client.query(
       `SELECT runs.run_id, runs.status, runs.multiplier_locked, runs.user_id,
-              runs.created_at, users.wallet_address_hash
+              runs.created_at, runs.run_nonce, users.wallet_address_hash
        FROM runs
        JOIN users ON users.id = runs.user_id
        WHERE runs.run_id = $1 FOR UPDATE`,
@@ -415,6 +472,19 @@ app.post('/runs/finish', async (req, res) => {
       return res.json({ runId, status: 'finished' });
     }
 
+    if (!runNonce || !checksum) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'runNonce and checksum required' });
+    }
+    if (run.run_nonce !== runNonce) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'runNonce mismatch' });
+    }
+    const expectedChecksum = buildRunChecksum(runId, rawScore, runNonce);
+    if (checksum !== expectedChecksum) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'checksum mismatch' });
+    }
     if (Number.isNaN(rawScore) || rawScore < 0) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'invalid rawScore' });
@@ -430,6 +500,11 @@ app.post('/runs/finish', async (req, res) => {
     if (durationSeconds < minRunDurationSeconds) {
       console.warn('run finished too quickly', { runId, durationSeconds });
     }
+    if (durationSeconds > maxRunDurationSeconds) {
+      console.warn('run exceeded max duration', { runId, durationSeconds });
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'run duration exceeded maximum' });
+    }
 
     const ticketsEarned = cleared ? baseTicketsPerClear * run.multiplier_locked : 0;
 
@@ -438,10 +513,11 @@ app.post('/runs/finish', async (req, res) => {
        SET raw_score = $1,
            cleared = $2,
            tickets_earned = $3,
+           checksum = $4,
            status = 'finished',
            finished_at = NOW()
-       WHERE run_id = $4`,
-      [rawScore, cleared, ticketsEarned, runId]
+       WHERE run_id = $5`,
+      [rawScore, cleared, ticketsEarned, checksum, runId]
     );
 
     if (ticketsEarned > 0) {
@@ -472,6 +548,74 @@ app.post('/runs/finish', async (req, res) => {
   } catch (error) {
     await client.query('ROLLBACK');
     return res.status(500).json({ error: 'run finish failed' });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/runs/abort', rateLimit('runs'), async (req, res) => {
+  const wallet = getWalletAddress(req);
+  if (!wallet) {
+    return res.status(401).json({ error: 'x-wallet-address required' });
+  }
+  const walletHash = getWalletHash(wallet);
+  const runId = req.body.runId as string | undefined;
+  if (!runId) {
+    return res.status(400).json({ error: 'runId required' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const runResult = await client.query(
+      `SELECT runs.run_id, runs.status, runs.user_id, runs.credits_wagered, users.wallet_address_hash,
+              users.credit_balance_encrypted
+       FROM runs
+       JOIN users ON users.id = runs.user_id
+       WHERE runs.run_id = $1 FOR UPDATE`,
+      [runId]
+    );
+    if (runResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'run not found' });
+    }
+    const run = runResult.rows[0];
+    if (run.wallet_address_hash !== walletHash) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'run does not belong to wallet' });
+    }
+    if (run.status !== 'started') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'run is not active' });
+    }
+
+    const refundRatio = Math.max(0, Math.min(1, runAbortRefundRatio));
+    const refundCredits = Math.max(0, Math.floor(run.credits_wagered * refundRatio));
+    if (refundCredits > 0) {
+      const currentBalance = decryptNumber(run.credit_balance_encrypted, 'credit_balance');
+      await client.query('UPDATE users SET credit_balance_encrypted = $1 WHERE id = $2', [
+        encryptString(String(currentBalance + refundCredits)),
+        run.user_id,
+      ]);
+      await client.query(
+        `INSERT INTO credit_ledger (user_id, delta_encrypted, reason, metadata_encrypted)
+         VALUES ($1, $2, 'run_abort_refund', $3)`,
+        [run.user_id, encryptString(String(refundCredits)), encryptString(JSON.stringify({ reason: 'abort' }))]
+      );
+    }
+
+    await client.query(
+      `UPDATE runs
+       SET status = 'aborted', aborted_at = NOW()
+       WHERE run_id = $1`,
+      [runId]
+    );
+
+    await client.query('COMMIT');
+    return res.json({ runId, status: 'aborted', refundedCredits: refundCredits });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    return res.status(500).json({ error: 'run abort failed' });
   } finally {
     client.release();
   }
@@ -634,6 +778,110 @@ app.post('/admin/credits/adjust', async (req, res) => {
   } catch (error) {
     await client.query('ROLLBACK');
     return res.status(500).json({ error: 'credit adjustment failed' });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/admin/tickets/adjust', async (req, res) => {
+  const adminKey = req.header('x-admin-key');
+  const expectedKey = requireEnv('ADMIN_API_KEY');
+  if (!adminKey || adminKey !== expectedKey) {
+    return res.status(403).json({ error: 'admin key invalid' });
+  }
+
+  const walletAddress = (req.body.walletAddress as string | undefined)
+    ? normalizeWalletAddress(req.body.walletAddress)
+    : undefined;
+  const delta = Number(req.body.delta);
+  if (!walletAddress || Number.isNaN(delta) || delta === 0) {
+    return res.status(400).json({ error: 'walletAddress and non-zero delta required' });
+  }
+
+  const walletHash = getWalletHash(walletAddress);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const userResult = await client.query(
+      'SELECT id, raffle_tickets_total_encrypted FROM users WHERE wallet_address_hash = $1 FOR UPDATE',
+      [walletHash]
+    );
+    if (userResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'user not found' });
+    }
+    const user = userResult.rows[0];
+    const currentTickets = decryptNumber(user.raffle_tickets_total_encrypted, 'raffle_tickets_total');
+    const updatedTickets = currentTickets + delta;
+    if (updatedTickets < 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'insufficient tickets' });
+    }
+    await client.query('UPDATE users SET raffle_tickets_total_encrypted = $1 WHERE id = $2', [
+      encryptString(String(updatedTickets)),
+      user.id,
+    ]);
+    await client.query('COMMIT');
+    return res.json({ walletAddress, raffle_tickets_total: updatedTickets });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    return res.status(500).json({ error: 'ticket adjustment failed' });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/admin/runs/invalidate', async (req, res) => {
+  const adminKey = req.header('x-admin-key');
+  const expectedKey = requireEnv('ADMIN_API_KEY');
+  if (!adminKey || adminKey !== expectedKey) {
+    return res.status(403).json({ error: 'admin key invalid' });
+  }
+  const runId = req.body.runId as string | undefined;
+  if (!runId) {
+    return res.status(400).json({ error: 'runId required' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const runResult = await client.query(
+      `SELECT runs.run_id, runs.status, runs.user_id, runs.tickets_earned,
+              users.raffle_tickets_total_encrypted
+       FROM runs
+       JOIN users ON users.id = runs.user_id
+       WHERE runs.run_id = $1 FOR UPDATE`,
+      [runId]
+    );
+    if (runResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'run not found' });
+    }
+    const run = runResult.rows[0];
+    if (run.status !== 'finished') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'run is not finished' });
+    }
+    const ticketsEarned = Number(run.tickets_earned || 0);
+    if (ticketsEarned > 0) {
+      const currentTickets = decryptNumber(run.raffle_tickets_total_encrypted, 'raffle_tickets_total');
+      const updatedTickets = Math.max(0, currentTickets - ticketsEarned);
+      await client.query('UPDATE users SET raffle_tickets_total_encrypted = $1 WHERE id = $2', [
+        encryptString(String(updatedTickets)),
+        run.user_id,
+      ]);
+    }
+    await client.query(
+      `UPDATE runs
+       SET status = 'invalid', raw_score = NULL, tickets_earned = 0
+       WHERE run_id = $1`,
+      [runId]
+    );
+    await client.query('COMMIT');
+    return res.json({ runId, status: 'invalid' });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    return res.status(500).json({ error: 'run invalidation failed' });
   } finally {
     client.release();
   }

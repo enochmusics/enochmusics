@@ -24,6 +24,7 @@ const defaultGearSkinId = Number(process.env.DEFAULT_GEAR_SKIN_ID || 100);
 const depositAbi = [
   'event Deposit(address indexed payer, uint256 amountWei, bytes32 indexed orderId)',
 ];
+const depositTopic = ethers.id('Deposit(address,uint256,bytes32)');
 
 function normalizeWalletAddress(value: string) {
   return value.toLowerCase();
@@ -108,6 +109,22 @@ async function processDeposits() {
   const logs = await contract.queryFilter(contract.filters.Deposit(), fromBlock, toBlock);
 
   for (const log of logs) {
+    const receipt = await provider.getTransactionReceipt(log.transactionHash);
+    if (!receipt || receipt.status !== 1) {
+      continue;
+    }
+    if (normalizeWalletAddress(receipt.to || '') !== normalizeWalletAddress(depositContractAddress)) {
+      continue;
+    }
+    const receiptLog = receipt.logs.find(
+      (entry) =>
+        entry.logIndex === log.index &&
+        normalizeWalletAddress(entry.address) === normalizeWalletAddress(depositContractAddress) &&
+        entry.topics?.[0] === depositTopic
+    );
+    if (!receiptLog) {
+      continue;
+    }
     const payer = normalizeWalletAddress(log.args?.payer as string);
     const orderId = log.args?.orderId as string | undefined;
     const amountWei = log.args?.amountWei as bigint;

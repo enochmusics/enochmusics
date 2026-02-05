@@ -43,12 +43,16 @@ CREATE TABLE IF NOT EXISTS runs (
   run_id UUID PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id),
   raw_score INTEGER,
+  run_nonce TEXT NOT NULL,
+  credits_wagered INTEGER NOT NULL DEFAULT 1,
+  checksum TEXT,
   multiplier_locked INTEGER NOT NULL,
   cleared BOOLEAN,
   tickets_earned INTEGER,
   status TEXT NOT NULL DEFAULT 'started',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  finished_at TIMESTAMPTZ
+  finished_at TIMESTAMPTZ,
+  aborted_at TIMESTAMPTZ
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS runs_active_user_unique

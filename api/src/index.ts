@@ -7,7 +7,7 @@ import { ethers } from 'ethers';
 import { pool, query } from './db.js';
 import { createServer as createHttpServer } from 'http';
 import { createServer as createHttpsServer } from 'https';
-import { WebSocketServer } from 'ws';
+import { WebSocket, WebSocketServer } from 'ws';
 import Redis from 'ioredis';
 import { decryptString, encryptString, hashValue } from './security/encryption.js';
 import { allowInsecureLocal, enforceTlsUrl, requireEnv } from './security/secrets.js';
@@ -49,6 +49,7 @@ enforceTlsUrl(redisUrl, 'REDIS_URL');
 const redisTls = loadClientTlsConfig('REDIS');
 const redisPub = new Redis(redisUrl, { password: redisPassword, tls: redisTls });
 const redisSub = new Redis(redisUrl, { password: redisPassword, tls: redisTls });
+const leaderboardChannel = 'leaderboards-realtime';
 
 function normalizeWalletAddress(value: string) {
   return value.toLowerCase();
@@ -68,6 +69,48 @@ function buildRunChecksum(runId: string, rawScore: number, runNonce: string) {
     .createHmac('sha256', runChecksumSecret)
     .update(`${runId}:${rawScore}:${runNonce}`)
     .digest('hex');
+}
+
+async function fetchScoreLeaderboard() {
+  const result = await query(
+    `SELECT users.wallet_address_encrypted, runs.raw_score
+     FROM runs
+     JOIN users ON users.id = runs.user_id
+     WHERE runs.raw_score IS NOT NULL
+     ORDER BY runs.raw_score DESC
+     LIMIT 50`
+  );
+  return result.rows.map((row) => ({
+    wallet_address: decryptString(row.wallet_address_encrypted),
+    raw_score: row.raw_score,
+  }));
+}
+
+async function fetchTicketLeaderboard() {
+  const result = await query(
+    `SELECT wallet_address_encrypted, raffle_tickets_total_encrypted
+     FROM users`
+  );
+  return result.rows
+    .map((row) => ({
+      wallet_address: decryptString(row.wallet_address_encrypted),
+      raffle_tickets_total: decryptNumber(row.raffle_tickets_total_encrypted, 'raffle_tickets_total'),
+    }))
+    .sort((a, b) => b.raffle_tickets_total - a.raffle_tickets_total)
+    .slice(0, 50);
+}
+
+async function publishLeaderboardSnapshot() {
+  try {
+    const [score, tickets] = await Promise.all([fetchScoreLeaderboard(), fetchTicketLeaderboard()]);
+    const payload = JSON.stringify({
+      type: 'leaderboard_update',
+      payload: { score, tickets },
+    });
+    await redisPub.publish(leaderboardChannel, payload);
+  } catch (error) {
+    console.error('leaderboard publish failed', error);
+  }
 }
 
 function rateLimit(scope: string) {
@@ -554,6 +597,7 @@ app.post('/runs/finish', rateLimit('runs'), async (req, res) => {
     );
 
     await client.query('COMMIT');
+    await publishLeaderboardSnapshot();
     return res.json({ runId, rawScore, ticketsEarned, status: 'finished' });
   } catch (error) {
     await client.query('ROLLBACK');
@@ -617,33 +661,12 @@ app.post('/runs/abort', rateLimit('runs'), async (req, res) => {
 });
 
 app.get('/leaderboards/score', async (_req, res) => {
-  const result = await query(
-    `SELECT users.wallet_address_encrypted, runs.raw_score
-     FROM runs
-     JOIN users ON users.id = runs.user_id
-     WHERE runs.raw_score IS NOT NULL
-     ORDER BY runs.raw_score DESC
-     LIMIT 50`
-  );
-  const leaderboard = result.rows.map((row) => ({
-    wallet_address: decryptString(row.wallet_address_encrypted),
-    raw_score: row.raw_score,
-  }));
+  const leaderboard = await fetchScoreLeaderboard();
   return res.json({ leaderboard });
 });
 
 app.get('/leaderboards/tickets', async (_req, res) => {
-  const result = await query(
-    `SELECT wallet_address_encrypted, raffle_tickets_total_encrypted
-     FROM users`
-  );
-  const leaderboard = result.rows
-    .map((row) => ({
-      wallet_address: decryptString(row.wallet_address_encrypted),
-      raffle_tickets_total: decryptNumber(row.raffle_tickets_total_encrypted, 'raffle_tickets_total'),
-    }))
-    .sort((a, b) => b.raffle_tickets_total - a.raffle_tickets_total)
-    .slice(0, 50);
+  const leaderboard = await fetchTicketLeaderboard();
   return res.json({ leaderboard });
 });
 
@@ -817,6 +840,7 @@ app.post('/admin/tickets/adjust', async (req, res) => {
       user.id,
     ]);
     await client.query('COMMIT');
+    await publishLeaderboardSnapshot();
     return res.json({ walletAddress, raffle_tickets_total: updatedTickets });
   } catch (error) {
     await client.query('ROLLBACK');
@@ -873,6 +897,7 @@ app.post('/admin/runs/invalidate', async (req, res) => {
       [runId]
     );
     await client.query('COMMIT');
+    await publishLeaderboardSnapshot();
     return res.json({ runId, status: 'invalid' });
   } catch (error) {
     await client.query('ROLLBACK');
@@ -888,6 +913,7 @@ const server = insecureLocal
   : createHttpsServer(loadServerTlsConfig(), app);
 const wss = new WebSocketServer({ server });
 const chatChannel = 'lobby-chat';
+const leaderboardSubscribers = new Set<WebSocket>();
 
 if (insecureLocal) {
   console.warn('HTTP/Ws enabled for local development only.');
@@ -905,18 +931,46 @@ redisSub.on('ready', () => {
 });
 
 redisSub.subscribe(chatChannel);
+redisSub.subscribe(leaderboardChannel);
 
-redisSub.on('message', (_channel, message) => {
-  wss.clients.forEach((client) => {
-    if (client.readyState === client.OPEN) {
-      client.send(message);
-    }
-  });
+redisSub.on('message', (channel, message) => {
+  if (channel === chatChannel) {
+    wss.clients.forEach((client) => {
+      if (client.readyState === client.OPEN) {
+        client.send(message);
+      }
+    });
+    return;
+  }
+  if (channel === leaderboardChannel) {
+    leaderboardSubscribers.forEach((client) => {
+      if (client.readyState === client.OPEN) {
+        client.send(message);
+      }
+    });
+  }
 });
 
 wss.on('connection', (socket) => {
   socket.on('message', (data) => {
-    redisPub.publish(chatChannel, data.toString());
+    const text = data.toString();
+    if (text.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed?.type === 'subscribe_leaderboards') {
+          leaderboardSubscribers.add(socket);
+          publishLeaderboardSnapshot();
+          return;
+        }
+      } catch (error) {
+        console.warn('websocket message parse failed', error);
+      }
+    }
+    redisPub.publish(chatChannel, text);
+  });
+
+  socket.on('close', () => {
+    leaderboardSubscribers.delete(socket);
   });
 });
 

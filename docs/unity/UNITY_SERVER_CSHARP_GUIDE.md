@@ -330,7 +330,69 @@ public async void ExampleFlow()
 
 ---
 
-## 7) 제공 파일 요약
+## 7) 실시간 랭킹 (InGame/Result Scene)
+
+실시간 랭킹은 **WebSocket(WSS)** 연결을 통해 수신합니다.
+
+### ✅ 구독 요청
+클라이언트가 아래 JSON을 WebSocket으로 전송하면 서버가 랭킹 업데이트를 push합니다.
+
+```json
+{ "type": "subscribe_leaderboards" }
+```
+
+### ✅ 서버 푸시 메시지 형식
+
+```json
+{
+  "type": "leaderboard_update",
+  "payload": {
+    "score": [
+      { "wallet_address": "0x...", "raw_score": 12345 }
+    ],
+    "tickets": [
+      { "wallet_address": "0x...", "raffle_tickets_total": 10 }
+    ]
+  }
+}
+```
+
+### ✅ Unity C# 예시 (ClientWebSocket)
+
+```csharp
+using System;
+using System.Net.WebSockets;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using Newtonsoft.Json;
+
+public async Task SubscribeLeaderboards(string wssUrl)
+{
+    using (var ws = new ClientWebSocket())
+    {
+        await ws.ConnectAsync(new Uri(wssUrl), CancellationToken.None);
+        var subscribe = Encoding.UTF8.GetBytes(\"{\\\"type\\\":\\\"subscribe_leaderboards\\\"}\");
+        await ws.SendAsync(new ArraySegment<byte>(subscribe), WebSocketMessageType.Text, true, CancellationToken.None);
+
+        var buffer = new byte[8192];
+        while (ws.State == WebSocketState.Open)
+        {
+            var result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+            if (result.MessageType == WebSocketMessageType.Close) break;
+            var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
+            // json = leaderboard_update payload
+        }
+    }
+}
+```
+
+> InGame Scene: 실시간 랭킹 상태 표시  
+> Result Scene: 전체 플레이어 랭킹 표시 (동일 데이터 사용)
+
+---
+
+## 8) 제공 파일 요약
 
 - `docs/unity/UNITY_SERVER_CSHARP_GUIDE.md`
 - (Unity용) `EnochServerClient.cs`

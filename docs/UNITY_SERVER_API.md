@@ -254,6 +254,32 @@ x-wallet-address: 0xabc...
 
 ---
 
+## 7-1) 실시간 랭킹 (WebSocket)
+
+WebSocket(WSS) 연결 후 아래 메시지를 보내면 실시간 랭킹을 수신합니다.
+
+**Subscribe Message**
+```json
+{ "type": "subscribe_leaderboards" }
+```
+
+**Server Push**
+```json
+{
+  "type": "leaderboard_update",
+  "payload": {
+    "score": [
+      { "wallet_address": "0x...", "raw_score": 12345 }
+    ],
+    "tickets": [
+      { "wallet_address": "0x...", "raffle_tickets_total": 10 }
+    ]
+  }
+}
+```
+
+---
+
 ## 8) 스킨
 
 ### `GET /skins/available`
